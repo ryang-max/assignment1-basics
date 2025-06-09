@@ -4,17 +4,19 @@ from typing import BinaryIO
 import regex as re
 import multiprocessing as mp
 from tqdm import tqdm
+from cs336_basics.common import gpt2_bytes_to_unicode
 
 
-PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-NUM_PROCESSES = 2  # Number of processes to use for parallel processing
+PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""" # Number of processes to use for parallel processing
 
 class BPETrainer:
-    def __init__(self, input_path: str, vocab_size: int, special_tokens: list[str] = None):
+    def __init__(self, input_path: str, vocab_size: int, special_tokens: list[str] = None, num_processes: int = 64):
         self.input_path = input_path
         self.vocab_size = vocab_size
         self.special_tokens = special_tokens if special_tokens else []
         self.PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+        self.NUM_PROCESSES = num_processes
+        self.bytes_decoder = gpt2_bytes_to_unicode()
 
     def find_chunk_boundaries(
             self,
@@ -74,7 +76,7 @@ class BPETrainer:
             f.seek(start)
             text = f.read(end - start)
             articles = re.split("|".join([re.escape(token) for token in self.special_tokens]), text)
-            for article in articles:
+            for article in tqdm(articles):
                 for item in re.finditer(self.PAT, article):
                     tokens[item.group()] += 1
         return tokens
@@ -82,7 +84,7 @@ class BPETrainer:
     def pretokenize(self):
         chunk_boundaries = self.find_chunk_boundaries(
             open(self.input_path, "rb"),
-            desired_num_chunks=NUM_PROCESSES
+            desired_num_chunks=self.NUM_PROCESSES
         )
         # print(f"Chunk boundaries: {chunk_boundaries}")
         all_tokens = defaultdict(int)
@@ -109,7 +111,7 @@ class BPETrainer:
         for i in range(256):
             vocab[idx] = bytes([i])
             idx += 1
-        while len(vocab) < self.vocab_size:
+        for idx in tqdm(range(len(vocab), self.vocab_size)):
             # Find the most frequent pair of tokens
             pairs = defaultdict(int)
             for token, count in all_tokens:
@@ -123,19 +125,21 @@ class BPETrainer:
             merges.append(selected_pair[0])
             new_token = selected_pair[0][0] + selected_pair[0][1]
             vocab[idx] = new_token
-            idx += 1
             # Update all tokens with the new merged token
             new_all_tokens = []
             for token, count in all_tokens:
                 new_token_list = []
                 i = 0
-                while i < len(token):
-                    if i < len(token) - 1 and (token[i], token[i + 1]) == selected_pair[0]:
-                        new_token_list.append(new_token)
-                        i += 2
-                    else:
-                        new_token_list.append(token[i])
-                        i += 1
+                if new_token in b''.join(token):
+                    while i < len(token):
+                        if i < len(token) - 1 and (token[i], token[i + 1]) == selected_pair[0]:
+                            new_token_list.append(new_token)
+                            i += 2
+                        else:
+                            new_token_list.append(token[i])
+                            i += 1
+                else:
+                    new_token_list = token
                 new_all_tokens.append((new_token_list, count))
             all_tokens = new_all_tokens
         return vocab, merges
